@@ -13,6 +13,7 @@ BuildRequires:  pkgconfig
 BuildRequires:  pkgconfig(liburing) >= 2.0
 BuildRequires:  txt2man
 BuildRequires:  systemd-rpc-devel
+BuildRequires:  liburing-devel
 
 Requires:       liburing >= 2.0
 %{?systemd_requires}
