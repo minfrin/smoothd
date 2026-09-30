@@ -15,12 +15,20 @@
  *
  */
 
+#include <stdio.h>
+#include <errno.h>
 #include <getopt.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include "config.h"
+
+#define SOCKET_PATH "/run/smoothd.sock"
+#define MAX_PACKET_SIZE 65536
 
 static struct option long_options[] =
 {
@@ -88,7 +96,9 @@ static int version()
 int main (int argc, char **argv)
 {
     const char *name = argv[0];
-    int c, status = 0, i;
+    int c, status = 0, i, rv;
+
+    char ff = 0xFF;
 
     while ((c = getopt_long(argc, argv, "hv", long_options, NULL)) != -1) {
 
@@ -109,6 +119,108 @@ int main (int argc, char **argv)
 
     if (optind == argc) {
         return help(name, "No command specified.\n", EXIT_FAILURE);
+    }
+
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd == -1) {
+        if (errno == EPROTONOSUPPORT) {
+            perror("SOCK_SEQPACKET is not supported on this platform");
+        }
+        else {
+            perror("Socket creation failed");
+        }
+        return 1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+    rv = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rv == -1) {
+        perror(SOCKET_PATH);
+        close(fd);
+        return 1;
+    }
+
+    while (optind < argc) {
+
+        rv = send(fd, argv[optind], strlen(argv[optind]) + 1, MSG_NOSIGNAL);
+        if (rv == -1) {
+            perror(SOCKET_PATH);
+            close(fd);
+            return 1;
+        }
+
+    }
+
+    /* send FF to tell the other side we are done */
+    rv = send(fd, &ff, sizeof(ff), MSG_NOSIGNAL);
+    if (rv == -1) {
+        perror(SOCKET_PATH);
+        close(fd);
+        return 1;
+    }
+
+    /* make space for one packet */
+    char *packet_buffer;
+    int max_packet_size = 0;
+    socklen_t optlen = sizeof(max_packet_size);
+
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &max_packet_size, &optlen)) {
+        perror(SOCKET_PATH);
+        close(fd);
+        return 1;
+    }
+
+    packet_buffer = malloc(max_packet_size);
+
+    /* fetch the result if any */
+
+    while (1) {
+
+        ssize_t n = recv(fd, packet_buffer, max_packet_size, 0);
+
+        /* we received a message */
+        if (n > 0) {
+
+            /* graceful termination? */
+            if (n == 1 && packet_buffer[0] == ff) {
+                free(packet_buffer);
+                close(fd);
+                return 0;
+            }
+
+            /* we have news from the server */
+            else {
+                fwrite(packet_buffer, 1, n, stderr);
+            }
+            
+        }
+
+        /* if we receive an empty packet, the server crashed */
+        else if (n == 0) {
+            fprintf(stderr, SOCKET_PATH ": server went away");
+            free(packet_buffer);
+            close(fd);
+            return 2;
+        }
+
+        /* if we received an error, handle the error */
+        else {
+            if (errno == EINTR) {
+                continue;
+            }
+            else {} {
+                perror(SOCKET_PATH);
+                free(packet_buffer);
+                close(fd);
+                return 1;
+            }
+
+        }
+        
     }
 
     return status;
